@@ -47,10 +47,236 @@ Both are invalid. You may also get a "type instantiation depth exceeded" error w
 
 You should ensure that changes to the filters result in an exact string literal since the purpose is to be able to quickly generate the exact string so you can preview it in the browser.
 */
-metric.preview('https://app.datadoghq.com/logs?query=%28%40duration%3A%3E100%20AND%20%40discriminator%3Aslash.events.api_request%29');
+metric.preview(
+  'https://app.datadoghq.com/logs?query=%28%40duration%3A%3E100%20AND%20%40discriminator%3Aslash.events.api_request%29'
+);
+
+/**
+ * ReplaceAll: Repeatedly replaces all occurrences of `From` in `S` with `To`.
+ */
+type ReplaceAll<
+  S extends string,
+  From extends string,
+  To extends string
+> = S extends `${infer Head}${From}${infer Tail}`
+  ? `${ReplaceAll<Head, From, To>}${To}${ReplaceAll<Tail, From, To>}`
+  : S;
+
+/**
+ * URLEncode: Percent-encode the raw Datadog query string
+ */
+type URLEncode<S extends string> = ReplaceAll<
+  ReplaceAll<
+    ReplaceAll<
+      ReplaceAll<
+        ReplaceAll<
+          ReplaceAll<
+            S,
+            '(', '%28'
+          >,
+          ')', '%29'
+        >,
+        ' ', '%20'
+      >,
+      '@', '%40'
+    >,
+    ':', '%3A'
+  >,
+  '>', '%3E'
+>;
+
+/**
+ * ExtractCondition: Pull out the compiled filter tree from a Metric type
+ */
+// Pull the Condition *returned* by filter(ctx)
+type ExtractCondition<M> =
+  M extends { filter: (ctx: any) => infer C }
+    ? C
+    : never;
+
+/**
+ * RenderBasic: Convert a single basic condition into its raw string form
+ */
+type RenderBasic<C extends { path: string; value: string; negated?: boolean }> =
+  `${C['negated'] extends true ? '-' : ''}${C['path']}:${C['value']}`;
+
+/**
+ * Join: Recursively join a tuple of strings with a separator
+ */
+type Join<
+  T extends readonly any[],
+  Sep extends string
+> = T extends [infer Head, ...infer Rest]
+  ? Rest['length'] extends 0
+    ? RenderCondition<Head>
+    : `${RenderCondition<Head>}${Sep}${Join<Rest, Sep>}`
+  : '';
+
+/**
+ * RenderCondition: Recursively render AND/OR groups and basic conditions
+ */
+type RenderCondition<C> =
+  C extends { type: 'basic'; path: string; value: string }
+    ? RenderBasic<C & { type: 'basic' }>
+  : C extends { type: 'AND'; conditions: infer A }
+    ? A extends readonly [any, ...any[]]
+      ? `(${Join<A, ' AND '>})`
+      : never
+  : C extends { type: 'OR'; conditions: infer O }
+    ? O extends readonly [any, ...any[]]
+      ? `(${Join<O, ' OR '>})`
+      : never
+  : never;
+
+/**
+ * RawQuery: Build the un-encoded query string from the filter tree
+ */
+type RawQuery<M> = RenderCondition<ExtractCondition<M>>;
+
+/**
+ * EncodedQuery: Percent-encode the raw query string
+ */
+type EncodedQuery<M> = URLEncode<RawQuery<M>>;
+
+/**
+ * GetDatadogLogPreviewResponse: The final URL literal type
+ */
+type GetDatadogLogPreviewResponse<M extends Metric<any>> =
+  `https://app.datadoghq.com/logs?query=${EncodedQuery<M>}`;
 
 
-type GetDatadogLogPreviewResponse<M extends Metric<any>> = '';
+// (1) Simple equals on discriminator
+const mEqualsOnly = logs.createMetric(apiRequestLog, {
+  name: 'only_discriminator',
+  compute: { type: 'count' },
+  filter: ctx => ctx.equals(ctx.log.discriminator, 'slash.events.api_request'),
+});
+const previewEqualsOnly = mEqualsOnly.preview(
+  'https://app.datadoghq.com/logs?query=%40discriminator%3Aslash.events.api_request'
+);
+
+type InferredEqualsOnly = typeof previewEqualsOnly;
+
+// 2) GreaterThan only on duration
+const mGtOnly = logs.createMetric(apiRequestLog, {
+  name: 'only_duration_gt',
+  compute: { type: 'count' },
+  filter: ctx => ctx.gt(ctx.log.duration, 100),
+});
+mGtOnly.preview(
+  'https://app.datadoghq.com/logs?query=%40duration%3A%3E100'
+);
+
+// 3) Wildcard match on http.route
+const mRouteLike = logs.createMetric(apiRequestLog, {
+  name: 'route_like',
+  compute: { type: 'count' },
+  filter: ctx => ctx.like(ctx.log.http.route, '/api/v1/*'),
+});
+mRouteLike.preview(
+  'https://app.datadoghq.com/logs?query=%40http.route%3A/api/v1/*'
+);
+
+// 4) Two-way AND (duration >100 AND status_code = 500)
+const mDurationStatus = logs.createMetric(apiRequestLog, {
+  name: 'slow_and_error',
+  compute: { type: 'count' },
+  filter: ctx => ctx.and(
+    ctx.gt(ctx.log.duration, 100),
+    ctx.equals(ctx.log.status_code, 500)
+  ),
+});
+mDurationStatus.preview(
+   'https://app.datadoghq.com/logs?query=%28%40duration%3A%3E100%20AND%20%40status_code%3A500%29'
+);
+
+// 5) Three-way AND (duration >200, status_code=404, method=GET)
+const mThree = logs.createMetric(apiRequestLog, {
+  name: 'triple_check',
+  compute: { type: 'count' },
+  filter: ctx => ctx.and(
+    ctx.gt(ctx.log.duration, 200),
+    ctx.equals(ctx.log.status_code, 404),
+    ctx.equals(ctx.log.http.method, 'GET')
+  ),
+});
+mThree.preview(
+  'https://app.datadoghq.com/logs?query=%28%40duration%3A%3E200%20AND%20%40status_code%3A404%20AND%20%40http.method%3AGET%29'
+);
+
+// Capture the return value
+const previewUrl = metric.preview(
+  'https://app.datadoghq.com/logs?query=%28%40duration%3A%3E100%20AND%20%40discriminator%3Aslash.events.api_request%29'
+);
+
+// Inspect it in your IDE:
+// Hover over `previewUrl` and you should see its type is exactly:
+//   "https://app.datadoghq.com/logs?query=%28%40duration%3A%3E100%20AND%20%40discriminator%3Aslash.events.api_request%29"
+
+type Inferred = typeof previewUrl;
+
+// ───────────────────────────────────────────────────────────────────────────────
+// ✨ TESTS START HERE ✨
+// ───────────────────────────────────────────────────────────────────────────────
+
+// 0) Original metric (2-clause distribution metric)
+const url0 = metric.preview(
+  'https://app.datadoghq.com/logs?query=%28%40duration%3A%3E100%20AND%20%40discriminator%3Aslash.events.api_request%29'
+);
+type T0 = typeof url0;
+// Hover T0: 
+//   "https://app.datadoghq.com/logs?query=%28%40duration%3A%3E100%20AND%20%40discriminator%3Aslash.events.api_request%29"
+
+// 1) equals-only metric
+const url1 = mEqualsOnly.preview(
+  'https://app.datadoghq.com/logs?query=%40discriminator%3Aslash.events.api_request'
+);
+type T1 = typeof url1; 
+// Hover T1: 
+//   "https://app.datadoghq.com/logs?query=%40discriminator%3Aslash.events.api_request"
+
+// 2) gt-only metric
+const url2 = mGtOnly.preview(
+  'https://app.datadoghq.com/logs?query=%40duration%3A%3E100'
+);
+type T2 = typeof url2;
+
+// 3) wildcard-route metric
+const url3 = mRouteLike.preview(
+  'https://app.datadoghq.com/logs?query=%40http.route%3A/api/v1/*'
+);
+type T3 = typeof url3;
+
+// 4) two-way AND (duration & status_code)
+const url4 = mDurationStatus.preview(
+  'https://app.datadoghq.com/logs?query=%28%40duration%3A%3E100%20AND%20%40status_code%3A500%29'
+);
+type T4 = typeof url4;
+
+// 5) three-way AND (duration, status_code, method)
+const url5 = mThree.preview(
+  'https://app.datadoghq.com/logs?query=%28%40duration%3A%3E200%20AND%20%40status_code%3A404%20AND%20%40http.method%3AGET%29'
+);
+type T5 = typeof url5;
+
+// ───────────────────────────────────────────────────────────────────────────────
+// 🔒 Negative tests—these must error if uncommented
+// ───────────────────────────────────────────────────────────────────────────────
+
+/*
+// @ts-expect-error  un-encoded `@` should be rejected
+
+metric.preview('https://app.datadoghq.com/logs?query=@duration:>100');
+
+
+
+// @ts-expect-error  missing leading '%28' on multi-clause should be rejected
+mDurationStatus.preview(
+  'https://app.datadoghq.com/logs?query=%40duration%3A%3E100%20AND%20%40status_code%3A500%29'
+);
+
+*/
+// ──
 
 
 function createLogs() {
@@ -103,16 +329,18 @@ function createLogs() {
       } as LogType<T>;
     },
     preview<M extends Metric<any>>(
-      _metric: M,
-      _link: GetDatadogLogPreviewResponse<M>
-    ) {},
+        _metric: M,
+         _link: GetDatadogLogPreviewResponse<M>
+       ): GetDatadogLogPreviewResponse<M> {
+          return _link;
+       },
     createMetric: <
       Log extends StructuredLog<any>,
       const M extends Metric<Log extends StructuredLog<infer T> ? T : never>,
     >(
       _log: Log,
       metric: M
-    ): M & { preview(_link: GetDatadogLogPreviewResponse<M>): void } => {
+    ): M & { preview(_link: GetDatadogLogPreviewResponse<M>): GetDatadogLogPreviewResponse<M> } => {
       function logProxy<PathType extends '' | '@'>(
         initialPath: PathType,
         path: string = initialPath
@@ -206,7 +434,12 @@ function createLogs() {
 
       registeredMetricsOnServerStart.set(metric.name, compiledMetric);
 
-      return { ...metric, preview() {} };
+      return {
+            ...metric,
+                preview(link: GetDatadogLogPreviewResponse<M>) {
+                  return link;
+                },
+            };
     },
   };
 }
@@ -397,3 +630,4 @@ interface LogType<T extends BaseLogFormat> {
   discriminator: T['discriminator'];
   $log: T;
 }
+
